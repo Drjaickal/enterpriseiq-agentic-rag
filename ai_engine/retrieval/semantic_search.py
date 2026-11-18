@@ -1,8 +1,10 @@
-﻿import os
-
-from sqlalchemy.orm import Session
+﻿
+import os
 from time import perf_counter
 
+from sqlalchemy.orm import Session
+
+from ai_engine.embeddings.gemini_embeddings import GeminiEmbeddingClient
 from ai_engine.embeddings.ollama_embeddings import OllamaEmbeddingClient
 from ai_engine.embeddings.vector_store import VectorStore
 
@@ -20,28 +22,53 @@ def semantic_search(
     if top_k < 1:
         raise ValueError("top_k must be at least 1.")
 
-    client = OllamaEmbeddingClient(
-        model=os.getenv(
-            "OLLAMA_EMBEDDING_MODEL",
-            "nomic-embed-text",
-        ),
-        base_url=os.getenv(
-            "OLLAMA_BASE_URL",
-            "http://localhost:11434",
-        ),
-    )
+    provider = os.getenv("EMBEDDING_PROVIDER", "ollama").lower()
+
+    if provider == "gemini":
+        client = GeminiEmbeddingClient(
+            model=os.getenv(
+                "GEMINI_EMBEDDING_MODEL",
+                "gemini-embedding-001",
+            )
+        )
+
+    elif provider == "ollama":
+        client = OllamaEmbeddingClient(
+            model=os.getenv(
+                "OLLAMA_EMBEDDING_MODEL",
+                "nomic-embed-text",
+            ),
+            base_url=os.getenv(
+                "OLLAMA_BASE_URL",
+                "http://localhost:11434",
+            ),
+        )
+
+    else:
+        raise ValueError(
+            f"Unsupported embedding provider: {provider}"
+        )
 
     embedding_start = perf_counter()
     query_embedding = client.embed_query(query.strip())
-    print(f"[SEARCH TIMING] Embedding: {perf_counter() - embedding_start:.3f}s")
+
+    print(
+        f"[SEARCH TIMING] Embedding: "
+        f"{perf_counter() - embedding_start:.3f}s"
+    )
 
     store = VectorStore(db)
 
     search_start = perf_counter()
+
     results = store.search(
-    query_embedding=query_embedding,
-    top_k=top_k,
-)
-    print(f"[SEARCH TIMING] Vector search: {perf_counter() - search_start:.3f}s")
+        query_embedding=query_embedding,
+        top_k=top_k,
+    )
+
+    print(
+        f"[SEARCH TIMING] Vector search: "
+        f"{perf_counter() - search_start:.3f}s"
+    )
 
     return results

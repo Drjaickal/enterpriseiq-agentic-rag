@@ -1,8 +1,11 @@
-﻿from time import perf_counter
+﻿
 import os
 import re
+from time import perf_counter
 
 import httpx
+from google import genai
+from google.genai import types
 from sqlalchemy.orm import Session
 
 from ai_engine.retrieval.semantic_search import semantic_search
@@ -21,21 +24,33 @@ def answer_question(
     if top_k < 1:
         raise ValueError("top_k must be at least 1.")
 
+    provider = os.getenv("GENERATION_PROVIDER", "ollama").lower()
+
+    if provider == "gemini":
+        model = os.getenv(
+            "GEMINI_GENERATION_MODEL",
+            "gemini-3.8-flash",
+        )
+    elif provider == "ollama":
+        model = os.getenv(
+            "OLLAMA_GENERATION_MODEL",
+            "qwen2.5:3b",
+        )
+    else:
+        raise ValueError(
+            f"Unsupported generation provider: {provider}"
+        )
+
     retrieval_start = perf_counter()
 
     retrieved_chunks = semantic_search(
-    query=query.strip(),
-    db=db,
-    top_k=top_k,
-)
+        query=query.strip(),
+        db=db,
+        top_k=top_k,
+    )
 
     retrieval_time = perf_counter() - retrieval_start
     print(f"[RAG TIMING] Retrieval: {retrieval_time:.3f}s")
-
-    model = os.getenv(
-        "OLLAMA_GENERATION_MODEL",
-        "qwen2.5:3b",
-    )
 
     if not retrieved_chunks:
         return {
@@ -72,6 +87,7 @@ def answer_question(
         })
 
     context = "\n\n".join(context_parts)
+
     print(f"[RAG TIMING] Context size: {len(context)} characters")
     print(f"[RAG TIMING] Retrieved sources: {len(sources)}")
 
@@ -96,8 +112,7 @@ STRICT RULES:
 10. Never reveal reasoning or internal analysis.
 """
 
-    user_prompt = f"""/no_think
-
+    user_prompt = f"""
 Answer the question using the supplied document context.
 
 Every factual sentence or bullet must end with
@@ -115,76 +130,103 @@ USER QUESTION:
 FINAL ANSWER:
 """
 
-    base_url = os.getenv(
-        "OLLAMA_BASE_URL",
-        "http://localhost:11434",
-    ).rstrip("/")
-
     generation_start = perf_counter()
+
     try:
-        response = httpx.post(
-            f"{base_url}/api/chat",
-            json={
-                "model": model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": system_prompt,
+        if provider == "gemini":
+            api_key = os.getenv("GEMINI_API_KEY")
+
+            if not api_key:
+                raise ValueError("GEMINI_API_KEY is not configured")
+
+            client = genai.Client(api_key=api_key)
+
+            response = client.models.generate_content(
+                model=model,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=0.1,
+                    max_output_tokens=250,
+                ),
+            )
+
+            answer = (response.text or "").strip()
+
+        else:
+            base_url = os.getenv(
+                "OLLAMA_BASE_URL",
+                "http://localhost:11434",
+            ).rstrip("/")
+
+            response = httpx.post(
+                f"{base_url}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": system_prompt,
+                        },
+                        {
+                            "role": "user",
+                            "content": user_prompt,
+                        },
+                    ],
+                    "stream": False,
+                    "think": False,
+                    "options": {
+                        "temperature": 0.1,
+                        "num_predict": 250,
+                        "repeat_penalty": 1.1,
                     },
-                    {
-                        "role": "user",
-                        "content": user_prompt,
-                    },
-                ],
-                "stream": False,
-                "think": False,
-                "options": {
-                    "temperature": 0.1,
-                    "num_predict": 250,
-                    "repeat_penalty": 1.1,
                 },
-            },
-            timeout=httpx.Timeout(
-                300.0,
-                connect=10.0,
-            ),
-        )
+                timeout=httpx.Timeout(
+                    300.0,
+                    connect=10.0,
+                ),
+            )
 
-        response.raise_for_status()
+            response.raise_for_status()
+            data = response.json()
+
+            print(
+                "[OLLAMA METRICS]",
+                {
+                    key: round(
+                        data.get(key, 0) / 1_000_000_000, 3
+                    )
+                    for key in (
+                        "load_duration",
+                        "prompt_eval_duration",
+                        "eval_duration",
+                        "total_duration",
+                    )
+                },
+            )
+
+            answer = data.get("message", {}).get(
+                "content", ""
+            ).strip()
+
         generation_time = perf_counter() - generation_start
-        print(f"[RAG TIMING] Generation: {generation_time:.3f}s")
 
-    except httpx.HTTPError as exc:
-        raise RuntimeError(
-            f"Could not generate an answer using Ollama: {exc}"
-        ) from exc
-
-    data = response.json()
-    print(
-    "[OLLAMA METRICS]",
-    {
-        key: round(data.get(key, 0) / 1_000_000_000, 3)
-        for key in (
-            "load_duration",
-            "prompt_eval_duration",
-            "eval_duration",
-            "total_duration",
+        print(
+            f"[RAG TIMING] Generation: {generation_time:.3f}s"
         )
-    },
-)
-    answer = data.get("message", {}).get(
-        "content", ""
-    ).strip()
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not generate an answer using {provider}: {exc}"
+        ) from exc
 
     if not answer:
         raise RuntimeError(
-            f"Ollama returned an empty answer. Response: {data}"
+            f"{provider} returned an empty answer."
         )
 
     # Remove invalid source references if the model invents them.
-    valid_source_numbers = set(
-        range(1, len(sources) + 1)
-    )
+    valid_source_numbers = set(range(1, len(sources) + 1))
 
     def validate_citation(match):
         number = int(match.group(1))
