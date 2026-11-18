@@ -1,4 +1,5 @@
-﻿import os
+﻿
+import os
 from pathlib import Path
 
 from sqlalchemy import select
@@ -7,6 +8,7 @@ from sqlalchemy.orm import Session
 from database.models import Document
 from ai_engine.ingestion.document_processor import process_document
 from ai_engine.chunking import chunk_text
+from ai_engine.embeddings.gemini_embeddings import GeminiEmbeddingClient
 from ai_engine.embeddings.ollama_embeddings import OllamaEmbeddingClient
 from ai_engine.embeddings.vector_store import VectorStore
 
@@ -52,16 +54,33 @@ def ingest_document(
     if not prepared_chunks:
         raise ValueError("No text content found in the document.")
 
-    embedding_client = OllamaEmbeddingClient(
-        model=os.getenv(
-            "OLLAMA_EMBEDDING_MODEL",
-            "nomic-embed-text",
-        ),
-        base_url=os.getenv(
-            "OLLAMA_BASE_URL",
-            "http://localhost:11434",
-        ),
-    )
+    # Select embedding provider from environment variables.
+    provider = os.getenv("EMBEDDING_PROVIDER", "ollama").lower()
+
+    if provider == "gemini":
+        embedding_client = GeminiEmbeddingClient(
+            model=os.getenv(
+                "GEMINI_EMBEDDING_MODEL",
+                "gemini-embedding-001",
+            )
+        )
+
+    elif provider == "ollama":
+        embedding_client = OllamaEmbeddingClient(
+            model=os.getenv(
+                "OLLAMA_EMBEDDING_MODEL",
+                "nomic-embed-text",
+            ),
+            base_url=os.getenv(
+                "OLLAMA_BASE_URL",
+                "http://localhost:11434",
+            ),
+        )
+
+    else:
+        raise ValueError(
+            f"Unsupported embedding provider: {provider}"
+        )
 
     texts = [item["content"] for item in prepared_chunks]
     embeddings = embedding_client.embed_texts(texts)
