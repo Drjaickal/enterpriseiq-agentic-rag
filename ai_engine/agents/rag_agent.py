@@ -159,11 +159,22 @@ FINAL ANSWER:
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
                     temperature=0.1,
-                    max_output_tokens=512,
+                    max_output_tokens=1024,
                 ),
             )
 
             answer = (response.text or "").strip()
+            print(
+                "[GEMINI METRICS]",
+                {
+                    "finish_reason": (
+                        str(response.candidates[0].finish_reason)
+                        if response.candidates
+                        else "UNKNOWN"
+                    ),
+                    "usage_metadata": str(response.usage_metadata),
+                },
+            )
 
         else:
             base_url = os.getenv(
